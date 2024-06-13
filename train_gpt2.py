@@ -42,9 +42,8 @@ class CausalSelfAttention(nn.Module):
         qkv = self.c_attn(x).view(B, T, 3, self.n_head, self.n_embd // self.n_head).permute(0, 2, 1, 3, 4)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T) where nh is number of heads, hs is head size
-        q, k, v = qkv.unbind(dim=1) # q, k, v are (B, T, n_head, head_dim)
+        q, k, v = qkv.view(3, B, self.n_head, T, self.n_embd // self.n_head).unbind(dim=0) # q, k, v are (B, n_head, T, head_dim)
         attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         attn = attn.masked_fill(self.mask[:,:,:T,:T] == 0, float('-inf'))
 
         attn = F.softmax(attn, dim=-1)
-        
