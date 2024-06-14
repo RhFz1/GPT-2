@@ -47,7 +47,7 @@ class CausalSelfAttention(nn.Module):
         attn = F.softmax(attn, dim=-1)
 
         y = attn @ v # (B, n_head, T, T) x (B, n_head, T, head_dim) -> (B, n_head, T, head_dim)
-        y = y.permute(0, 2, 1, 3).contiguous().view(B, T, self.n_embd)
+        y = y.permute(0, 2, 1, 3).contiguous().view(B, T, self.n_embd) # (B, T, n_head, head_dim) -> (B, T, n_embd)
 
         out = self.c_proj(y) # (B, T, n_embd)
         return out
