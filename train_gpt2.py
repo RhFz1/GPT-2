@@ -9,11 +9,9 @@ from typing import Tuple, List, Dict, Optional
 
 @dataclass
 class GPTConfig:
-    vocab_size: int = 50304
-    block_size: int = 1024
-    embd_pdrop: float = 0.1
-    resid_pdrop: float = 0.1
-    attn_pdrop: float = 0.1
+    n_embd: int = 768
+    n_head: int = 12
+    block_size: int = 64
 
 class CausalSelfAttention(nn.Module):
 
@@ -42,8 +40,14 @@ class CausalSelfAttention(nn.Module):
         qkv = self.c_attn(x).view(B, T, 3, self.n_head, self.n_embd // self.n_head).permute(0, 2, 1, 3, 4)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T) where nh is number of heads, hs is head size
-        q, k, v = qkv.view(3, B, self.n_head, T, self.n_embd // self.n_head).unbind(dim=0) # q, k, v are (B, n_head, T, head_dim)
-        attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        q, k, v = qkv.reshape(3, B, self.n_head, T, self.n_embd // self.n_head).unbind(dim=0) # q, k, v are (B, n_head, T, head_dim)
+        attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B, n_head, T, head_dim) x (B, n_head, head_dim, T) -> (B, n_head, T, T
         attn = attn.masked_fill(self.mask[:,:,:T,:T] == 0, float('-inf'))
 
         attn = F.softmax(attn, dim=-1)
+
+        y = attn @ v # (B, n_head, T, T) x (B, n_head, T, head_dim) -> (B, n_head, T, head_dim)
+        y = y.permute(0, 2, 1, 3).contiguous().view(B, T, self.n_embd)
+
+        out = self.c_proj(y) # (B, T, n_embd)
+        return out
