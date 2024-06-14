@@ -51,3 +51,32 @@ class CausalSelfAttention(nn.Module):
 
         out = self.c_proj(y) # (B, T, n_embd)
         return out
+
+class MLP(nn.Module):
+
+    def __init__(self, config: GPTConfig) -> None:
+        super().__init__()
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.act = nn.GELU(approximate='tanh')
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        x = self.c_fc(x)
+        x = self.act(x)
+        x = self.c_proj(x)
+        return x
+
+
+class Block(nn.Module):
+
+    def __init__(self, config: GPTConfig) -> None:
+        super().__init__()
+        self.ln1 = nn.LayerNorm(config.n_embd)
+        self.ln2 = nn.LayerNorm(config.n_embd)
+        self.attn = CausalSelfAttention(config)
+        self.mlp = MLP(config)
+
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.ln1(x))
+        x = x + self.mlp(self.ln2(x))
+        return x
