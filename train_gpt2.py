@@ -9,6 +9,8 @@ from typing import Tuple, List, Dict, Optional
 
 @dataclass
 class GPTConfig:
+    layers: int = 12
+    vocab_size: int = 50304
     n_embd: int = 768
     n_head: int = 12
     block_size: int = 64
@@ -82,3 +84,33 @@ class Block(nn.Module):
         x = x + self.attn(self.ln1(x)) # Skip connection as per paper.
         x = x + self.mlp(self.ln2(x))
         return x
+
+class GPT(nn.Module):
+
+    def __init__(self, config: GPTConfig) -> None:
+        super().__init__()
+        self.config = config
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            h = nn.ModuleList([Block(config) for _ in range(config.layers)]),
+            ln_f = nn.LayerNorm(config.n_embd)
+        ))
+        self. lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # shape of x is (B, T) where B is batch size and T is block size
+        B, T = x.shape
+        assert T <= self.config.block_size, "Cannot forward, model block size is exhausted."
+        pos = torch.arange(T, dtype=torch.long, device=x.device) # (T)
+        pos_emb = self.transformer.wpe(pos)
+        tok_emb = self.transformer.wte(x)
+        x = tok_emb + pos_emb
+
+        for block in self.transformer.h:
+            x = block(x)
+        
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x) # (B, T, vocab_size)
+
+        return logits
