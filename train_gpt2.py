@@ -53,12 +53,14 @@ class CausalSelfAttention(nn.Module):
         return out
 
 class MLP(nn.Module):
+    # MLP after attention
+    # Intuitively used for the model to learn about the attention output
 
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.act = nn.GELU(approximate='tanh')
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd) # (B, T, n_embd) -> (B, T, 4 * n_embd)
+        self.act = nn.GELU(approximate='tanh') 
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd) # (B, T, 4 * n_embd) -> (B, T, n_embd
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = self.c_fc(x)
@@ -71,12 +73,12 @@ class Block(nn.Module):
 
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
-        self.ln1 = nn.LayerNorm(config.n_embd)
+        self.ln1 = nn.LayerNorm(config.n_embd) # Layer Normalization preferred over batch normalization, as it is more robust.
         self.ln2 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.mlp = MLP(config)
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x))
+        x = x + self.attn(self.ln1(x)) # Skip connection as per paper.
         x = x + self.mlp(self.ln2(x))
         return x
