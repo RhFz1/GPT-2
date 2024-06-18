@@ -102,11 +102,13 @@ class GPT(nn.Module):
         # shape of x is (B, T) where B is batch size and T is block size
         B, T = x.shape
         assert T <= self.config.block_size, "Cannot forward, model block size is exhausted."
-        pos = torch.arange(T, dtype=torch.long, device=x.device) # (T)
-        pos_emb = self.transformer.wpe(pos)
-        tok_emb = self.transformer.wte(x)
-        x = tok_emb + pos_emb
+        pos = torch.arange(T, dtype=torch.long, device=x.device) # (T) as we cannot expect to a sequence of length greater than block size.
+        pos_emb = self.transformer.wpe(pos) # (T, n_embd)
+        tok_emb = self.transformer.wte(x) # (B, T, n_embd)
+        x = tok_emb + pos_emb # (B, T, n_embd)
 
+        # This is the forward pass of the transformer model.
+        # It is a recursive flow of input through the transformer blocks.
         for block in self.transformer.h:
             x = block(x)
         
