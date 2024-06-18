@@ -1,4 +1,5 @@
 import torch
+import tiktoken
 import math 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +16,7 @@ class GPTConfig:
     n_embd: int = 768
     n_head: int = 12
     block_size: int = 1024
+    device: str = 'cpu' if not torch.cuda.is_available() else 'cuda'
 
 class CausalSelfAttention(nn.Module):
 
@@ -67,7 +69,7 @@ class MLP(nn.Module):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd) # (B, T, n_embd) -> (B, T, 4 * n_embd)
         self.act = nn.GELU(approximate='tanh') 
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd) # (B, T, 4 * n_embd) -> (B, T, n_embd
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd) # (B, T, 4 * n_embd) -> (B, T, n_embd)
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = self.c_fc(x)
@@ -89,6 +91,26 @@ class Block(nn.Module):
         x = x + self.attn(self.ln_1(x)) # Skip connection as per paper.
         x = x + self.mlp(self.ln_2(x))
         return x
+
+
+class Tokenizer():
+    def __init__(self, enc_type: str = "gpt2") -> None:
+        self.encoder = tiktoken.get_encoding(enc_type)
+    def encode(self, text: str) -> torch.Tensor:
+
+        tokens = self.encoder.encode(text) # Now the text is converted to tokens gpt2 has roughly 50k tokens (vocab_size). each token value corresponding to a word segment.
+        assert len(tokens) <= GPTConfig.block_size, "Token length exceeds the block size of the model." # The model has a block size of 1024 tokens.
+        tokens = torch.tensor(tokens, dtype=torch.long).unsqueeze(0) # (1, T) this is done for adding a batch dimension.
+        tokens = tokens.to(GPTConfig.device) # moving the tokens to the GPU.
+        return tokens
+    def decode(self, tokens: torch.Tensor) -> str:
+
+        B, T = tokens.shape
+
+        assert B == 1, "Only supports batch size of 1 for now." # Only supporting batch size of 1 for now, will add support for multiple batch sizes later.
+        text = self.encoder.decode(tokens.squeeze().tolist())
+
+        return text 
 
 class GPT(nn.Module):
 
@@ -161,6 +183,28 @@ class GPT(nn.Module):
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k])
         return model
+    
+    def _generate(self, prompt: str, max_len: int = 100, temperature: float = 1.0) -> str:
+        self.eval() # Setting to eval mode, for efficiency.
+        tokenizer = Tokenizer() # Tokenizer class is used to encode the prompt.
+        x = tokenizer.encode(prompt) # (1, T)
 
-model = GPT.from_pretrained("gpt2")
-print("loaded!!")
+        for _ in range(max_len):
+            logits = self.forward(x)
+            logits = logits[:, -1, :] / temperature # (B, vocab_size) focusing on the last token, for prediction.
+
+            probs = F.softmax(logits, dim=-1) # (B, vocab_size) applying softmax to get probabilities.
+            next_token = torch.multinomial(probs, num_samples=1) # (B, 1) sampling the next token from the distribution.
+            x = torch.cat((x, next_token), dim=-1) # (1, T + 1) appending the next token to the sequence.\
+        return x
+
+
+# model = GPT.from_pretrained('gpt2')
+# while inferencing we usually keep the model in eval mode, for efficiency.
+
+tokenizer = Tokenizer()
+
+prompt = "The quick brown fox jumps over the lazy dog."
+x = tokenizer.encode(prompt)
+print(x)
+print(tokenizer.decode(x))
