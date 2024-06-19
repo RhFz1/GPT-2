@@ -196,15 +196,6 @@ class GPT(nn.Module):
             probs = F.softmax(logits, dim=-1) # (B, vocab_size) applying softmax to get probabilities.
             next_token = torch.multinomial(probs, num_samples=1) # (B, 1) sampling the next token from the distribution.
             x = torch.cat((x, next_token), dim=-1) # (1, T + 1) appending the next token to the sequence.\
-        return x
-
-
-# model = GPT.from_pretrained('gpt2')
-# while inferencing we usually keep the model in eval mode, for efficiency.
-
-tokenizer = Tokenizer()
-
-prompt = "The quick brown fox jumps over the lazy dog."
-x = tokenizer.encode(prompt)
-print(x)
-print(tokenizer.decode(x))
+        
+        text = tokenizer.decode(x) # Decoding the tokens to text.
+        return text
