@@ -52,12 +52,12 @@ class CausalSelfAttention(nn.Module):
 
         q, k, v = qkv.reshape(3, B * self.n_head, T, self.n_embd // self.n_head).unbind(dim=0) # q, k, v are (B * n_head, T, head_dim)
     
-        attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B * n_head, T, head_dim) x (B * n_head, head_dim, T) -> (B * n_head, T, T)
-        attn = attn.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-
-        attn = F.softmax(attn, dim=-1)
-
-        y = attn @ v # (B * n_head, T, T) x (B * n_head, T, head_dim) -> (B * n_head, T, head_dim)
+        # attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))) # (B * n_head, T, head_dim) x (B * n_head, head_dim, T) -> (B * n_head, T, T)
+        # attn = attn.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        # attn = F.softmax(attn, dim=-1)
+        # y = attn @ v # (B * n_head, T, T) x (B * n_head, T, head_dim) -> (B * n_head, T, head_dim)
+        
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         # y = y.permute(0, 2, 1, 3).contiguous().view(B, T, self.n_embd) # (B, T, n_head, head_dim) -> (B, T, n_embd)
         y = y.view(B, self.n_head, T, self.n_embd // self.n_head).permute(0, 2, 1, 3).reshape(B, T, self.n_embd)
         out = self.c_proj(y) # (B, T, n_embd)
@@ -276,9 +276,12 @@ class DataLoader():
             self.current_pos = 0
         
         return x, y
+    
+device = GPTConfig.device
 
 model = GPT(GPTConfig())
-train_loader = DataLoader(B = 16, T = 64)
+model = torch.compile(model)
+train_loader = DataLoader(B = 16, T = 128)
 
 torch.set_float32_matmul_precision('high')
 # run train loop
