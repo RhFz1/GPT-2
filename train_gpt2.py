@@ -188,13 +188,13 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
         return model
     
-    def _generate(self, prompt: str, max_len: int = 100, temperature: float = 1.0) -> str:
+    def _generate(self, prompt: str, max_len: int = 20, temperature: float = 1.0) -> str:
         self.eval() # Setting to eval mode, for efficiency.
         tokenizer = Tokenizer() # Tokenizer class is used to encode the prompt.
         x = tokenizer.encode(prompt) # (1, T)
 
         for _ in range(max_len):
-            logits = self.forward(x)
+            logits, _ = self.forward(x)
             logits = logits[:, -1, :] / temperature # (B, vocab_size) focusing on the last token, for prediction.
 
             probs = F.softmax(logits, dim=-1) # (B, vocab_size) applying softmax to get probabilities.
@@ -243,8 +243,15 @@ x = buf[:-1].view(B, T)
 y = buf[1: ].view(B, T)
 
 model = GPT(GPTConfig())
-logits = model(x)
+logits, loss = model(x, y)
 
-print(logits.shape)
+print(loss)
 
 import sys; sys.exit(0)
+
+# Eval the model
+
+model.eval()
+prompt = "The king was riding his horse"
+
+print(model._generate(prompt, max_len=100, temperature=1.0))
