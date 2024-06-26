@@ -56,7 +56,7 @@ class CausalSelfAttention(nn.Module):
         # attn = attn.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
         # attn = F.softmax(attn, dim=-1)
         # y = attn @ v # (B * n_head, T, T) x (B * n_head, T, head_dim) -> (B * n_head, T, head_dim)
-        
+
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         # y = y.permute(0, 2, 1, 3).contiguous().view(B, T, self.n_embd) # (B, T, n_head, head_dim) -> (B, T, n_embd)
         y = y.view(B, self.n_head, T, self.n_embd // self.n_head).permute(0, 2, 1, 3).reshape(B, T, self.n_embd)
@@ -279,7 +279,7 @@ class DataLoader():
     
 device = GPTConfig.device
 
-model = GPT(GPTConfig())
+model = GPT(GPTConfig(vocab_size=50304))
 model = torch.compile(model)
 train_loader = DataLoader(B = 16, T = 128)
 
