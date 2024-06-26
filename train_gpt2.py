@@ -126,7 +126,7 @@ class GPT(nn.Module):
         ))
         self. lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, y: torch.Tensor = None) -> torch.Tensor:
         # shape of x is (B, T) where B is batch size and T is block size
         B, T = x.shape
         assert T <= self.config.block_size, "Cannot forward, model block size is exhausted."
@@ -142,8 +142,11 @@ class GPT(nn.Module):
         
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x) # (B, T, vocab_size)
-
-        return logits
+        loss = None
+        if y is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.shape[-1]), y.view(-1)) # (B * T, vocab_size), (B * T). Cross Entropy accepts input in this format (refer PyTorch documentation).
+        
+        return logits, loss
     
     @classmethod
     def from_pretrained(cls, model_type: str = "gpt2") -> 'GPT':
