@@ -211,8 +211,8 @@ class GPT(nn.Module):
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
 
         # all the parameters with 2D dim will be decayed, rest others shall not which include biases and layernorm weights.
-        decay_parameters = [p for n, p in param_dict.items() if p.dim >= 2]
-        non_decay_parameters = [p for n, p in param_dict.items() if p.dim < 2]
+        decay_parameters = [p for n, p in param_dict.items() if p.dim() >= 2]
+        non_decay_parameters = [p for n, p in param_dict.items() if p.dim() < 2]
         optim_groups = [
             {"params": decay_parameters, "weight_decay": weight_decay},
             {"params": non_decay_parameters, "weight_decay": 0.0}
@@ -243,9 +243,18 @@ x = buf[:-1].view(B, T)
 y = buf[1: ].view(B, T)
 
 model = GPT(GPTConfig())
-logits, loss = model(x, y)
 
-print(loss)
+# run train loop
+
+model.train()
+optimizer = model.configure_optimizers(0.1, 3e-4, GPTConfig.device)
+
+for i in range(50):
+    optimizer.zero_grad()
+    logits, loss = model(x, y)
+    loss.backward()
+    optimizer.step()
+    print(f"Loss: {loss.item()}")
 
 import sys; sys.exit(0)
 
