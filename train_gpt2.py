@@ -1,4 +1,5 @@
 import torch
+import time
 import tiktoken
 import inspect
 import math 
@@ -277,19 +278,25 @@ class DataLoader():
         return x, y
 
 model = GPT(GPTConfig())
-train_loader = DataLoader(B = 4, T = 32)
+train_loader = DataLoader(B = 16, T = 64)
+
+torch.set_float32_matmul_precision('high')
 # run train loop
 
 model.train()
 optimizer = model.configure_optimizers(0.1, 3e-4, GPTConfig.device)
 
 for i in range(50):
+    t0 = time.time()
     x, y = train_loader.next_batch()
     optimizer.zero_grad()
     logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
-    print(f"Loss: {loss.item():.3f}")
+    t1 = time.time()
+    dt = (t1 - t0) * 1000
+    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+    print(f"step {i}, loss: {loss.item():.4f}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)
 
