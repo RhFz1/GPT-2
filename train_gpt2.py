@@ -1,5 +1,6 @@
 import torch
 import tiktoken
+import inspect
 import math 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -199,3 +200,25 @@ class GPT(nn.Module):
         
         text = tokenizer.decode(x) # Decoding the tokens to text.
         return text
+    
+    def configure_optimizers(self, weight_decay, learning_rate, device_type):
+
+        # segregating the parameters of the model into two groups, one with weight decay and one without.
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+
+        # all the parameters with 2D dim will be decayed, rest others shall not which include biases and layernorm weights.
+        decay_parameters = [p for n, p in param_dict.items() if p.dim >= 2]
+        non_decay_parameters = [p for n, p in param_dict.items() if p.dim < 2]
+        optim_groups = [
+            {"params": decay_parameters, "weight_decay": weight_decay},
+            {"params": non_decay_parameters, "weight_decay": 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_parameters)
+        num_non_decay_params = sum(p.numel() for p in non_decay_parameters)
+
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == 'cuda'
+
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+        return optimizer
