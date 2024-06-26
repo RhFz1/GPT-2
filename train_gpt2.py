@@ -222,3 +222,26 @@ class GPT(nn.Module):
 
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
+
+# Sampling from shakespere
+import tiktoken
+
+enc = tiktoken.get_encoding("gpt2")
+
+with open('input.txt', 'r') as file:
+    text = file.read()
+
+text = text[:1000]
+tokens = enc.encode(text)
+
+B,T = 4, 32
+buf = torch.tensor(tokens[: B * T + 1])
+x = buf[:-1].view(B, T)
+y = buf[1: ].view(B, T)
+
+model = GPT(GPTConfig())
+logits = model(x)
+
+print(logits.shape)
+
+import sys; sys.exit(0)
