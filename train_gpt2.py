@@ -124,7 +124,10 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.layers)]),
             ln_f = nn.LayerNorm(config.n_embd)
         ))
-        self. lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # Weight sharing between the token embeddings and the final linear layer, also known as parameter tying.
+        self.transformer.wte.weight = self.lm_head.weight 
 
     def forward(self, x: torch.Tensor, y: torch.Tensor = None) -> torch.Tensor:
         # shape of x is (B, T) where B is batch size and T is block size
