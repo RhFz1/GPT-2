@@ -29,6 +29,7 @@ class CausalSelfAttention(nn.Module):
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.GPT2SCALEINIT = 1
         
         # heads and head size
         self.n_head = config.n_head
@@ -71,6 +72,7 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd) # (B, T, n_embd) -> (B, T, 4 * n_embd)
         self.act = nn.GELU(approximate='tanh') 
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd) # (B, T, 4 * n_embd) -> (B, T, n_embd)
+        self.c_proj.GPT2SCALEINIT = 1
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = self.c_fc(x)
@@ -127,7 +129,24 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         # Weight sharing between the token embeddings and the final linear layer, also known as parameter tying.
-        self.transformer.wte.weight = self.lm_head.weight 
+        self.transformer.wte.weight = self.lm_head.weight
+
+        self.apply(self._init_weights)
+    def _init_weights(self, module) -> None:
+        # Here in this function we try to initialize the weights of the model.
+        # As per the paper we are supposed to rescale the weights on the basis of number of skip connections.
+        # We n layers and each layer has 2 skip connections (one after attention and one after MLP).
+        # For proof of reasoning and math refer to the paper.
+
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'GPT2SCALEINIT'):
+                std *= (2 * self.config.layers) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor = None) -> torch.Tensor:
         # shape of x is (B, T) where B is batch size and T is block size
