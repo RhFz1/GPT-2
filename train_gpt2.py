@@ -1,3 +1,4 @@
+import os
 import torch
 import time
 import tiktoken
@@ -9,6 +10,8 @@ import torch.utils
 from transformers import GPT2LMHeadModel
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Optional
+from dotenv import load_dotenv
+load_dotenv()
 
 
 
@@ -244,57 +247,101 @@ class GPT(nn.Module):
         num_decay_params = sum(p.numel() for p in decay_parameters)
         num_non_decay_params = sum(p.numel() for p in non_decay_parameters)
 
+        if master_process:
+            print(f"num of decayed parameter tensors: {len(decay_parameters)}, with {num_decay_params:,} parameters")
+            print(f"num of non-decayed parameter tensors: {len(non_decay_parameters)}, with {num_non_decay_params:,} parameters")
+
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
 
+        if use_fused:
+            print("Using Fused AdamW: {use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
 
 # Sampling from shakespere
 class DataLoader():
-    def __init__(self, B, T):
+    def __init__(self, B, T, process_rank, num_processes):
 
         self.B = B
         self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
 
         with open('input.txt', 'r') as file:
             text = file.read()
 
         tokenizer = tiktoken.get_encoding('gpt2')
         self.tokens = torch.tensor(tokenizer.encode(text))
-
-        print(f"Loaded text of length {len(text)} and {len(self.tokens)} tokens.")
-        print(f"Epoch size: {len(self.tokens) // (B * T)} batches.")
-        self.current_pos = 0
+        if master_process:
+            print(f"Total number of tokens: {len(self.tokens)}")
+        self.current_pos = self.B * self.T * self.process_rank
     def next_batch(self):
         B, T = self.B, self.T
         buf = self.tokens[self.current_pos:self.current_pos + B * T + 1]
         x = buf[:-1].view(B, T)
         y = buf[1:].view(B, T)
-        self.current_pos += B * T
+        self.current_pos += B * T * self.num_processes
 
-        if self.current_pos + B * T + 1 > len(self.tokens):
+        if self.current_pos + B * T * self.num_processes + 1 > len(self.tokens):
             self.current_pos = 0
         
         return x, y
     
+# Rule of thumb
+# Use the 'NCCL' backend for distributed GPU training.
+# Use the 'Gloo' backend for distributed CPU training.
+
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+
+ddp = int(os.environ.get('RANK', -1)) != -1
+
+# this block configures the ddp settings, adding an else to it to perform vanilla run if ddp is not enabled.
+if ddp:
+    # i have read the torch docs. I think we can use the gloo backend to run ddp on a multi core cpu
+    assert dist.is_gloo_available(), "Gloo backend is not available for DDP."
+    init_process_group(backend='gloo')
+    ddp_rank = int(os.environ.get('RANK'))
+    ddp_local_rank = int(os.environ.get('LOCAL_RANK'))
+    ddp_world_size = int(os.environ.get('WORLD_SIZE'))
+    master_process = ddp_rank == 0
+else:
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+    # auto detect device
+    device = 'cpu'
+    if torch.cuda.is_available():
+        device = 'cuda'
+    master_process = True
+    print(f"Running on {device}.")
+
 device = GPTConfig.device
 
-model = GPT(GPTConfig(vocab_size=50304))
-model = torch.compile(model)
 
-total_batch_size = 524288
-B = 16
-T = 128
-assert total_batch_size % (B * T) == 0, "Batch size is not a multiple of the total batch size."
-grad_acc_steps = total_batch_size // (B * T)
-print(f"Total batch size: {total_batch_size}")
-print(f"Gradient accumulation steps: {grad_acc_steps}")
+total_batch_size = 32768
+B = 16 # micro batch size
+T = 128 # sequence length
+assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 
-train_loader = DataLoader(B = B, T = T)
+if master_process:
+    print(f"total desired batch size: {total_batch_size}")
+    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+
+train_loader = DataLoader(B = B, T = T, process_rank=ddp_rank, num_processes=ddp_world_size)
 
 torch.set_float32_matmul_precision('high')
 # run train loop
+model = GPT(GPTConfig(vocab_size=50304))
+model = torch.compile(model)
+
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
+raw_model = model.module if ddp else model
 
 model.train()
 
@@ -323,11 +370,16 @@ for i in range(max_steps):
     t0 = time.time()
     loss_accum = 0.0
     optimizer.zero_grad()
-    for microstep in range(grad_acc_steps):
+    for microstep in range(grad_accum_steps):
         x, y = train_loader.next_batch()
         logits, loss = model(x, y)
-        loss_accum += loss.detach() / grad_acc_steps
+        loss_accum += loss.detach() / grad_accum_steps
         loss.backward()
+        if ddp:
+            model.require_backward_grad_sync = (microstep == grad_accum_steps - 1)
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate
     lr = get_lr(i)
@@ -338,7 +390,7 @@ for i in range(max_steps):
     t1 = time.time()
     # time delta in s
     dt = (t1 - t0) 
-    tokens_per_sec = (train_loader.B * train_loader.T * grad_acc_steps) / (t1 - t0)
+    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1 - t0)
     print(f"step {i:4d} | lr: {lr:.5f} | loss: {loss.item():.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)
