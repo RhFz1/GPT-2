@@ -282,7 +282,16 @@ device = GPTConfig.device
 
 model = GPT(GPTConfig(vocab_size=50304))
 model = torch.compile(model)
-train_loader = DataLoader(B = 16, T = 128)
+
+total_batch_size = 524288
+B = 16
+T = 128
+assert total_batch_size % (B * T) == 0, "Batch size is not a multiple of the total batch size."
+grad_acc_steps = total_batch_size // (B * T)
+print(f"Total batch size: {total_batch_size}")
+print(f"Gradient accumulation steps: {grad_acc_steps}")
+
+train_loader = DataLoader(B = B, T = T)
 
 torch.set_float32_matmul_precision('high')
 # run train loop
@@ -312,22 +321,24 @@ optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, dev
 
 for i in range(max_steps):
     t0 = time.time()
-    x, y = train_loader.next_batch()    
+    loss_accum = 0.0
     optimizer.zero_grad()
-    logits, loss = model(x, y)
-    loss.backward()
+    for microstep in range(grad_acc_steps):
+        x, y = train_loader.next_batch()
+        logits, loss = model(x, y)
+        loss_accum += loss.detach() / grad_acc_steps
+        loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate
     lr = get_lr(i)
 
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
-
     optimizer.step()
     t1 = time.time()
     # time delta in s
     dt = (t1 - t0) 
-    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+    tokens_per_sec = (train_loader.B * train_loader.T * grad_acc_steps) / (t1 - t0)
     print(f"step {i:4d} | lr: {lr:.5f} | loss: {loss.item():.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)
