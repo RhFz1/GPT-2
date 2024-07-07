@@ -252,7 +252,7 @@ class GPT(nn.Module):
             print(f"num of non-decayed parameter tensors: {len(non_decay_parameters)}, with {num_non_decay_params:,} parameters")
 
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
+        use_fused = False and fused_available and device_type == 'cuda'
 
         if use_fused:
             print("Using Fused AdamW: {use_fused}")
@@ -286,8 +286,8 @@ class DataLoader():
         if self.current_pos + B * T * self.num_processes + 1 > len(self.tokens):
             self.current_pos = 0
         
-        return x, y
-    
+        return x.to(GPTConfig.device), y.to(GPTConfig.device)
+
 # Rule of thumb
 # Use the 'NCCL' backend for distributed GPU training.
 # Use the 'Gloo' backend for distributed CPU training.
@@ -322,7 +322,7 @@ else:
 device = GPTConfig.device
 
 
-total_batch_size = 32768
+total_batch_size = 65536
 B = 16 # micro batch size
 T = 128 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
@@ -336,8 +336,11 @@ train_loader = DataLoader(B = B, T = T, process_rank=ddp_rank, num_processes=ddp
 
 torch.set_float32_matmul_precision('high')
 # run train loop
-model = GPT(GPTConfig(vocab_size=50304))
+model_args = GPTConfig(vocab_size=50304)
+model = GPT(model_args)
+model = model.to(device)
 model = torch.compile(model)
+out_dir = '/home/syednoor/Desktop/FAIR/GPT-2/models'
 
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
@@ -348,7 +351,7 @@ model.train()
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 10
-max_steps = 50
+max_steps = 1000
 
 def get_lr(it):
     # 1) linear warmup for warmup iters
@@ -366,13 +369,15 @@ def get_lr(it):
 
 optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
 
+glb_loss = 6.00
+
 for i in range(max_steps):
     t0 = time.time()
     loss_accum = 0.0
     optimizer.zero_grad()
     for microstep in range(grad_accum_steps):
         x, y = train_loader.next_batch()
-        logits, loss = model(x, y)
+        logits, loss = model(x, y)  
         loss_accum += loss.detach() / grad_accum_steps
         loss.backward()
         if ddp:
@@ -380,6 +385,18 @@ for i in range(max_steps):
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
+    if glb_loss > loss_accum:
+        glb_loss = loss_accum
+        if i > 0:
+            checkpoint = {
+                'model' : model.state_dict(),
+                'optimizer' : optimizer.state_dict(),
+                'model_args' : model_args,
+                'iter_num' : i,
+                'best_val_loss': glb_loss,
+            }
+            print(f"saving model checkpoint to {out_dir}")
+            torch.save(checkpoint, os.path.join(out_dir, 'ckpt_00.pt'))
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate
     lr = get_lr(i)
@@ -393,7 +410,7 @@ for i in range(max_steps):
     tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1 - t0)
     print(f"step {i:4d} | lr: {lr:.5f} | loss: {loss.item():.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
 
-import sys; sys.exit(0)
+
 
 # Eval the model
 
