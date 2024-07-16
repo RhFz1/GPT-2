@@ -1,0 +1,14 @@
+step    0 | lr: 0.00006 | loss: 10.989293 | dt: 43962.32ms | tok/sec: 2981.46
+step    1 | lr: 0.00007 | loss: 10.204505 | dt: 5486.59ms | tok/sec: 23889.50
+step    2 | lr: 0.00007 | loss: 9.919868 | dt: 7205.08ms | tok/sec: 18191.61
+step    3 | lr: 0.00008 | loss: 9.829269 | dt: 7168.86ms | tok/sec: 18283.52
+step    4 | lr: 0.00008 | loss: 9.771800 | dt: 7177.90ms | tok/sec: 18260.50
+step    5 | lr: 0.00009 | loss: 9.719623 | dt: 7186.93ms | tok/sec: 18237.55
+step    6 | lr: 0.00009 | loss: 9.663667 | dt: 7169.20ms | tok/sec: 18282.66
+step    7 | lr: 0.00010 | loss: 9.609272 | dt: 7186.48ms | tok/sec: 18238.69
+step    8 | lr: 0.00010 | loss: 9.528841 | dt: 7242.49ms | tok/sec: 18097.65
+step    9 | lr: 0.00011 | loss: 9.489420 | dt: 7192.49ms | tok/sec: 18223.45
+step   10 | lr: 0.00011 | loss: 9.449212 | dt: 7167.90ms | tok/sec: 18285.97
+step   11 | lr: 0.00012 | loss: 9.395689 | dt: 7416.07ms | tok/sec: 17674.05
+step   12 | lr: 0.00012 | loss: 9.355871 | dt: 7183.52ms | tok/sec: 18246.21
+step   13 | lr: 0.00013 | loss: 9.302144 | dt: 7171.58ms | tok/sec: 18276.58
