@@ -7,6 +7,7 @@ import math
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils
+from collections import OrderedDict
 from transformers import GPT2LMHeadModel
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Optional
@@ -252,10 +253,10 @@ class GPT(nn.Module):
             print(f"num of non-decayed parameter tensors: {len(non_decay_parameters)}, with {num_non_decay_params:,} parameters")
 
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = False and fused_available and device_type == 'cuda'
+        use_fused = fused_available and device_type == 'cuda'
 
         if use_fused:
-            print("Using Fused AdamW: {use_fused}")
+            print(f"Using Fused AdamW: {use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
 
@@ -268,7 +269,7 @@ class DataLoader():
         self.process_rank = process_rank
         self.num_processes = num_processes
 
-        with open('input.txt', 'r') as file:
+        with open('train.txt', 'r') as file:
             text = file.read()
 
         tokenizer = tiktoken.get_encoding('gpt2')
@@ -322,8 +323,8 @@ else:
 device = GPTConfig.device
 
 
-total_batch_size = 65536
-B = 16 # micro batch size
+total_batch_size = 131072
+B = 32 # micro batch size
 T = 128 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
@@ -334,13 +335,38 @@ if master_process:
 
 train_loader = DataLoader(B = B, T = T, process_rank=ddp_rank, num_processes=ddp_world_size)
 
+
+model_path = os.path.join(os.getcwd(), 'models', 'ckpt_00.pt')
+
 torch.set_float32_matmul_precision('high')
 # run train loop
-model_args = GPTConfig(vocab_size=50304)
-model = GPT(model_args)
+
+glb_loss = 10.00
+
+if os.path.exists(model_path):
+
+    print(f"Loading the model: {model_path}......")
+    checkpoint = torch.load(model_path)
+
+    new_keys = {key: key[10:] for key in checkpoint['model'].keys()}
+    checkpoint['model'] = OrderedDict((new_keys.get(k, k), v) for k, v in checkpoint['model'].items())
+
+    model_args = checkpoint['model_args']
+    model = GPT(model_args)
+    model.load_state_dict(checkpoint['model'])
+
+    print(f"Previous model loaded!, best loss: {checkpoint['best_val_loss']}")
+
+    glb_loss = checkpoint['best_val_loss']
+    
+else:
+    model_args = GPTConfig(vocab_size=50304)
+    model = GPT(model_args)
+    print(f"No previous model found making new model.")
+
 model = model.to(device)
 model = torch.compile(model)
-out_dir = '/home/syednoor/Desktop/FAIR/GPT-2/models'
+out_dir = '/home/ec2-user/GPT-2/models'
 
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
@@ -350,8 +376,8 @@ model.train()
 
 max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 10
-max_steps = 1000
+warmup_steps = 100
+max_steps = 10000
 
 def get_lr(it):
     # 1) linear warmup for warmup iters
@@ -367,32 +393,47 @@ def get_lr(it):
 
     return min_lr + coeff * (max_lr - min_lr)
 
-optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
 
-glb_loss = 6.00
+eval_iters = 10
+eval_interval = 20
 
 for i in range(max_steps):
     t0 = time.time()
+
+    if i != 0 and i % eval_interval == 0:
+        model.eval()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            for _ in range(eval_iters):
+                x, y = train_loader.next_batch()
+                with torch.autocast(device_type=device, dtype=torch.float16):
+                    logits, loss = model(x, y)
+                loss = loss / eval_interval
+                val_loss_accum += loss.detach()
+
     loss_accum = 0.0
     optimizer.zero_grad()
     for microstep in range(grad_accum_steps):
-        x, y = train_loader.next_batch()
-        logits, loss = model(x, y)  
-        loss_accum += loss.detach() / grad_accum_steps
+        x, y = train_loader.next_batch()    
+        with torch.autocast(device_type=GPTConfig.device, dtype=torch.float16):
+            logits, loss = model(x, y)  
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach()
         loss.backward()
         if ddp:
             model.require_backward_grad_sync = (microstep == grad_accum_steps - 1)
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
-    if glb_loss > loss_accum:
-        glb_loss = loss_accum
+    if glb_loss > val_loss_accum:
+        glb_loss = val_loss_accum   
         if i > 0:
             checkpoint = {
-                'model' : model.state_dict(),
-                'optimizer' : optimizer.state_dict(),
+                'model' : raw_model.state_dict(),
+                'config' : raw_model.config,  
                 'model_args' : model_args,
-                'iter_num' : i,
+                'step' : i,
                 'best_val_loss': glb_loss,
             }
             print(f"saving model checkpoint to {out_dir}")
@@ -408,13 +449,15 @@ for i in range(max_steps):
     # time delta in s
     dt = (t1 - t0) 
     tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1 - t0)
-    print(f"step {i:4d} | lr: {lr:.5f} | loss: {loss.item():.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
-
-
+    print(f"step {i:4d} | lr: {lr:.5f} | loss: {loss_accum.item():.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+    
+    # writing to log file to track the changes.
+    with open('logfile.txt', 'a') as f:
+        f.write(f"step {i:4d} | lr: {lr:.5f} | loss: {loss_accum.item():.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}\n")
 
 # Eval the model
 
 model.eval()
-prompt = "The king was riding his horse"
+prompt = "I have a heart disease "
 
-print(model._generate(prompt, max_len=100, temperature=1.0))
+print(model._generate(prompt, max_len=400, temperature=1.0))
