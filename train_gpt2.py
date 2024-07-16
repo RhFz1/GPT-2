@@ -325,7 +325,7 @@ device = GPTConfig.device
 
 total_batch_size = 131072
 B = 32 # micro batch size
-T = 128 # sequence length
+T = 256 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 
@@ -395,8 +395,9 @@ def get_lr(it):
 
 optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
 
-eval_iters = 10
+eval_iters = 5
 eval_interval = 20
+save_step = 10
 
 for i in range(max_steps):
     t0 = time.time()
@@ -411,6 +412,9 @@ for i in range(max_steps):
                     logits, loss = model(x, y)
                 loss = loss / eval_interval
                 val_loss_accum += loss.detach()
+        with open('logfile.txt', 'a') as f:
+            f.write(f"validation loss: {val_loss_accum / eval_iters}, step: {i + 1}")
+        print(f"validation loss: {val_loss_accum / eval_iters}, step: {i + 1}")
 
     loss_accum = 0.0
     optimizer.zero_grad()
@@ -426,9 +430,9 @@ for i in range(max_steps):
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
-    if glb_loss > val_loss_accum:
-        glb_loss = val_loss_accum   
-        if i > 0:
+    if glb_loss > loss_accum:
+        glb_loss = loss_accum   
+        if i > 0 and i % save_step == 0:
             checkpoint = {
                 'model' : raw_model.state_dict(),
                 'config' : raw_model.config,  
