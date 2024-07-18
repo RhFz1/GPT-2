@@ -269,7 +269,7 @@ class DataLoader():
         self.process_rank = process_rank
         self.num_processes = num_processes
 
-        with open('train.txt', 'r') as file:
+        with open('input.txt', 'r') as file:
             text = file.read()
 
         tokenizer = tiktoken.get_encoding('gpt2')
@@ -324,7 +324,7 @@ device = GPTConfig.device
 
 
 total_batch_size = 131072
-B = 32 # micro batch size
+B = 16 # micro batch size
 T = 256 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
@@ -336,7 +336,7 @@ if master_process:
 train_loader = DataLoader(B = B, T = T, process_rank=ddp_rank, num_processes=ddp_world_size)
 
 
-model_path = os.path.join(os.getcwd(), 'models', 'ckpt_00.pt')
+model_path = os.path.join(os.getcwd(), 'models', 'ckpt_01.pt')
 
 torch.set_float32_matmul_precision('high')
 # run train loop
@@ -374,9 +374,9 @@ raw_model = model.module if ddp else model
 
 model.train()
 
-max_lr = 6e-4
+max_lr = 3e-4
 min_lr = max_lr * 0.1
-warmup_steps = 100
+warmup_steps = 85
 max_steps = 10000
 
 def get_lr(it):
@@ -408,20 +408,18 @@ for i in range(max_steps):
             val_loss_accum = 0.0
             for _ in range(eval_iters):
                 x, y = train_loader.next_batch()
-                with torch.autocast(device_type=device, dtype=torch.float16):
-                    logits, loss = model(x, y)
+                logits, loss = model(x, y)
                 loss = loss / eval_interval
                 val_loss_accum += loss.detach()
-        with open('logfile.txt', 'a') as f:
-            f.write(f"validation loss: {val_loss_accum / eval_iters}, step: {i + 1}")
+        with open('nlogfile.txt', 'a') as f:
+            f.write(f"validation loss: {val_loss_accum / eval_iters}, step: {i + 1}\n")
         print(f"validation loss: {val_loss_accum / eval_iters}, step: {i + 1}")
 
     loss_accum = 0.0
     optimizer.zero_grad()
     for microstep in range(grad_accum_steps):
         x, y = train_loader.next_batch()    
-        with torch.autocast(device_type=GPTConfig.device, dtype=torch.float16):
-            logits, loss = model(x, y)  
+        logits, loss = model(x, y)  
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
         loss.backward()
@@ -441,7 +439,7 @@ for i in range(max_steps):
                 'best_val_loss': glb_loss,
             }
             print(f"saving model checkpoint to {out_dir}")
-            torch.save(checkpoint, os.path.join(out_dir, 'ckpt_00.pt'))
+            torch.save(checkpoint, os.path.join(out_dir, 'ckpt_01.pt'))
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate
     lr = get_lr(i)
@@ -456,7 +454,7 @@ for i in range(max_steps):
     print(f"step {i:4d} | lr: {lr:.5f} | loss: {loss_accum.item():.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
     
     # writing to log file to track the changes.
-    with open('logfile.txt', 'a') as f:
+    with open('nlogfile.txt', 'a') as f:
         f.write(f"step {i:4d} | lr: {lr:.5f} | loss: {loss_accum.item():.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}\n")
 
 # Eval the model
