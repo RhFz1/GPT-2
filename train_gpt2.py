@@ -24,6 +24,7 @@ class GPTConfig:
     n_head: int = 12
     block_size: int = 1024
     device: str = 'cpu' if not torch.cuda.is_available() else 'cuda'
+    dropout: float = 0.3
 
 class CausalSelfAttention(nn.Module):
 
@@ -41,6 +42,8 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
 
+        self.dropout = nn.Dropout(config.dropout)
+
         # causal mask to ensure that attention is only applied to the left in the input sequence
         # setting it to bias only for naming reasons.
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
@@ -53,7 +56,7 @@ class CausalSelfAttention(nn.Module):
         # (B, T, 3 * n_embd) -> (B, T, 3, n_head, head_dim) -> (B, 3, T, n_head, head_dim)
 
 
-        qkv = self.c_attn(x).reshape(B, T, 3, self.n_head, self.n_embd // self.n_head).permute(0, 2, 1, 3, 4)
+        qkv = self.c_attn(self.dropout(x)).reshape(B, T, 3, self.n_head, self.n_embd // self.n_head).permute(0, 2, 1, 3, 4)
 
         q, k, v = qkv.reshape(3, B * self.n_head, T, self.n_embd // self.n_head).unbind(dim=0) # q, k, v are (B * n_head, T, head_dim)
     
@@ -65,7 +68,7 @@ class CausalSelfAttention(nn.Module):
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         # y = y.permute(0, 2, 1, 3).contiguous().view(B, T, self.n_embd) # (B, T, n_head, head_dim) -> (B, T, n_embd)
         y = y.view(B, self.n_head, T, self.n_embd // self.n_head).permute(0, 2, 1, 3).reshape(B, T, self.n_embd)
-        out = self.c_proj(y) # (B, T, n_embd)
+        out = self.c_proj(self.dropout(y)) # (B, T, n_embd)
         
         return out
 
@@ -79,11 +82,12 @@ class MLP(nn.Module):
         self.act = nn.GELU(approximate='tanh') 
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd) # (B, T, 4 * n_embd) -> (B, T, n_embd)
         self.c_proj.GPT2SCALEINIT = 1
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        x = self.c_fc(x)
+        x = self.c_fc(self.dropout(x))
         x = self.act(x)
-        x = self.c_proj(x)
+        x = self.c_proj(self.dropout(x))
         return x
 
 
@@ -220,6 +224,7 @@ class GPT(nn.Module):
         self.eval() # Setting to eval mode, for efficiency.
         tokenizer = Tokenizer() # Tokenizer class is used to encode the prompt.
         x = tokenizer.encode(prompt) # (1, T)
+        x = x.to(GPTConfig.device)
 
         for _ in range(max_len):
             logits, _ = self.forward(x)
@@ -277,6 +282,10 @@ class DataLoader():
         if master_process:
             print(f"Total number of tokens: {len(self.tokens)}")
         self.current_pos = self.B * self.T * self.process_rank
+    
+    def reset(self):
+        self.current_pos = torch.randint(len(self.tokens) - self.B * self.T, (1,)).item()
+
     def next_batch(self):
         B, T = self.B, self.T
         buf = self.tokens[self.current_pos:self.current_pos + B * T + 1]
@@ -323,8 +332,11 @@ else:
 device = GPTConfig.device
 
 
-total_batch_size = 131072
-B = 16 # micro batch size
+torch.set_float32_matmul_precision('high')
+# run train loop
+
+total_batch_size = 262144
+B = 32 # micro batch size
 T = 256 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
@@ -334,9 +346,10 @@ if master_process:
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
 train_loader = DataLoader(B = B, T = T, process_rank=ddp_rank, num_processes=ddp_world_size)
+val_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size)
 
 
-model_path = os.path.join(os.getcwd(), 'models', 'ckpt_01.pt')
+model_path = os.path.join(os.getcwd(), 'models', 'ckpt_02.pt')
 
 torch.set_float32_matmul_precision('high')
 # run train loop
@@ -366,7 +379,7 @@ else:
 
 model = model.to(device)
 model = torch.compile(model)
-out_dir = '/home/ec2-user/GPT-2/models'
+out_dir = '/home/ec2-user/FAIR/GPT-2/models'
 
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
@@ -376,8 +389,8 @@ model.train()
 
 max_lr = 3e-4
 min_lr = max_lr * 0.1
-warmup_steps = 85
-max_steps = 10000
+warmup_steps = 10
+max_steps = 650
 
 def get_lr(it):
     # 1) linear warmup for warmup iters
@@ -397,32 +410,46 @@ optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4,
 
 eval_iters = 5
 eval_interval = 20
-save_step = 10
+save_step = 1
+test_step = 50
 
 for i in range(max_steps):
     t0 = time.time()
 
+
+    if i != 0 and i % test_step == 0:
+        model.eval()
+        prompt = "FIRST CITIZEN"
+        print(model._generate(prompt, max_len=100, temperature=1.0))
+
+    val_loss_accum = 0.0
     if i != 0 and i % eval_interval == 0:
         model.eval()
         with torch.no_grad():
-            val_loss_accum = 0.0
+            val_loader.reset()
             for _ in range(eval_iters):
-                x, y = train_loader.next_batch()
+                x, y = val_loader.next_batch()
                 logits, loss = model(x, y)
-                loss = loss / eval_interval
+                loss = loss / eval_iters
                 val_loss_accum += loss.detach()
         with open('nlogfile.txt', 'a') as f:
             f.write(f"validation loss: {val_loss_accum / eval_iters}, step: {i + 1}\n")
         print(f"validation loss: {val_loss_accum / eval_iters}, step: {i + 1}")
 
+    # do one step of grad accum iters
+    model.train()
     loss_accum = 0.0
     optimizer.zero_grad()
     for microstep in range(grad_accum_steps):
-        x, y = train_loader.next_batch()    
-        logits, loss = model(x, y)  
+        x, y = train_loader.next_batch()
+
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            logits, loss = model(x, y)  
+
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
         loss.backward()
+
         if ddp:
             model.require_backward_grad_sync = (microstep == grad_accum_steps - 1)
     if ddp:
@@ -439,7 +466,7 @@ for i in range(max_steps):
                 'best_val_loss': glb_loss,
             }
             print(f"saving model checkpoint to {out_dir}")
-            torch.save(checkpoint, os.path.join(out_dir, 'ckpt_01.pt'))
+            torch.save(checkpoint, os.path.join(out_dir, 'ckpt_02.pt'))
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate
     lr = get_lr(i)
@@ -447,6 +474,10 @@ for i in range(max_steps):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     optimizer.step()
+
+    if GPTConfig.device == "cuda":
+        torch.cuda.synchronize() # wait for the GPU to finish work
+    
     t1 = time.time()
     # time delta in s
     dt = (t1 - t0) 
@@ -456,10 +487,3 @@ for i in range(max_steps):
     # writing to log file to track the changes.
     with open('nlogfile.txt', 'a') as f:
         f.write(f"step {i:4d} | lr: {lr:.5f} | loss: {loss_accum.item():.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}\n")
-
-# Eval the model
-
-model.eval()
-prompt = "I have a heart disease "
-
-print(model._generate(prompt, max_len=400, temperature=1.0))
