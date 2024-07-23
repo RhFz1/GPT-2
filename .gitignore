@@ -3,3 +3,4 @@ try.ipynb
 .env
 /models
 /venv
+/logs
