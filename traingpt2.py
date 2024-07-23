@@ -21,9 +21,9 @@ parser.add_argument("--run_num", type=int, required=True, help="Enter the traini
 args = parser.parse_args()
 
 # Paths
-train_log_path = os.path.join(os.environ.get('TRAIN_LOG_PATH'), 'trainlogs.txt')
-val_log_path = os.path.join(os.environ.get('VAL_LOG_PATH'), 'vallogs.txt')
-model_path = glob.glob(os.environ.get('REGISTRY_PATH') + '*.pt')
+train_log_path = os.path.join(os.getenv('LOG_PATH'), '/trainlogs.txt')
+val_log_path = os.path.join(os.getenv('LOG_PATH'), '/vallogs.txt')
+model_path = glob.glob(os.getenv('REGISTRY_PATH')+'/' + '*.pt')
 model_path = model_path[-1] if len(model_path) > 0 else None
 model_out_path = os.environ.get('REGISTRY_PATH')
 
@@ -93,9 +93,11 @@ if model_path:
     model = GPT(model_args)
     model.load_state_dict(checkpoint['model'])
 
-    print(f"Previous model loaded!, best loss: {checkpoint['best_val_loss']}")
+    print(f"Previous model loaded!, best loss: {checkpoint['best_loss']:.4f}")
 
-    glb_loss = checkpoint['best_val_loss']
+    # Reinit lr
+    max_lr = checkpoint['lr'] * gain_for_next
+    min_lr = max_lr * 0.1
     
 else:
     model_args = GPTConfig(vocab_size=50304)
@@ -107,15 +109,12 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
 raw_model = model.module if ddp else model
 
-# Setting up the optimizer
-optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=checkpoint['lr'] * gain_for_next if checkpoint else 6e-4, device_type=device)
-
 # Placing the model on the GPU
 model = model.to(device)
 # It fuses the models individual operations wherever possible, making it faster while training.
 model = torch.compile(model)
-# setting the model to train
-model.train()
+# Setting up the optimizer
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=checkpoint['lr'] * gain_for_next if checkpoint else 6e-4, device_type=device)
 
 def get_lr(it):
     # 1) linear warmup for warmup iters
@@ -138,8 +137,8 @@ if master_process:
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
 # Setting up the dataloader
-train_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size)
-val_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size)
+train_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train')
+val_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val')
 
 # loss tracking dictionary
 losses = {}
@@ -163,6 +162,7 @@ for i in range(max_steps):
             val_loader.reset()
             for _ in range(eval_iters):
                 x, y = val_loader.next_batch()
+                x, y = x.to(device), y.to(device)
                 logits, loss = model(x, y)
                 loss = loss / eval_iters
                 val_loss_accum += loss.detach()
@@ -182,12 +182,13 @@ for i in range(max_steps):
     optimizer.zero_grad()
     for microstep in range(grad_accum_steps):
         x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
         # torch.autocast is used to perform mixed precision training.
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             logits, loss = model(x, y)  
         # Normalizing the loss, mathematical correctness for grad. accumulation.
         loss = loss / grad_accum_steps
-        loss_accum += loss.detach()
+        loss_accum += loss.detach() 
         loss.backward()
 
         if ddp:

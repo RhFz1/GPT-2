@@ -1,6 +1,6 @@
 import torch
 import os
-from train_gpt2 import GPT, GPTConfig
+from traingpt2 import GPT, GPTConfig
 
 model_path = '/home/syednoor/Desktop/FAIR/GPT-2/models'
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

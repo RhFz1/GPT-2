@@ -9,6 +9,7 @@ from transformers import GPT2LMHeadModel
 from dotenv import load_dotenv
 load_dotenv()
 
+master_process = True
 
 class CausalSelfAttention(nn.Module):
 
