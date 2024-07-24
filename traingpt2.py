@@ -21,8 +21,8 @@ parser.add_argument("--run_num", type=int, required=True, help="Enter the traini
 args = parser.parse_args()
 
 # Paths
-train_log_path = os.path.join(os.getenv('LOG_PATH'), '/trainlogs.txt')
-val_log_path = os.path.join(os.getenv('LOG_PATH'), '/vallogs.txt')
+train_log_path = os.path.join(os.getenv('LOG_PATH'), 'trainlogs.txt')
+val_log_path = os.path.join(os.getenv('LOG_PATH'), 'vallogs.txt')
 model_path = glob.glob(os.getenv('REGISTRY_PATH')+'/' + '*.pt')
 model_path = model_path[-1] if len(model_path) > 0 else None
 model_out_path = os.environ.get('REGISTRY_PATH')
@@ -62,12 +62,12 @@ grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 max_lr = 3e-4
 min_lr = max_lr * 0.1
 warmup_steps = 10
-max_steps = 650
+max_steps = 10000
 gain_for_next = 1.25
 # Evaluation Params
 eval_iters = 5
 eval_interval = 20
-save_step = 21 # save the model once evaluation is done.
+save_step = 10 # save the model once evaluation is done.
 test_step = 50
 # Torch precision settings
 torch.set_float32_matmul_precision('high')
@@ -81,13 +81,14 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # Loading if existing trained model present
 checkpoint = None # using this for setting learning rate.
+best_loss = float('inf')
 
 if model_path:
     print(f"Loading the model: {model_path}......")
     checkpoint = torch.load(model_path)
 
-    new_keys = {key: key[10:] for key in checkpoint['model'].keys()}
-    checkpoint['model'] = OrderedDict((new_keys.get(k, k), v) for k, v in checkpoint['model'].items())
+    # new_keys = {key: key[10:] for key in checkpoint['model'].keys()}
+    # checkpoint['model'] = OrderedDict((new_keys.get(k, k), v) for k, v in checkpoint['model'].items())
 
     model_args = checkpoint['model_args']
     model = GPT(model_args)
@@ -98,6 +99,7 @@ if model_path:
     # Reinit lr
     max_lr = checkpoint['lr'] * gain_for_next
     min_lr = max_lr * 0.1
+    best_loss = checkpoint['best_loss']
     
 else:
     model_args = GPTConfig(vocab_size=50304)
@@ -141,7 +143,7 @@ train_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_wor
 val_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val')
 
 # loss tracking dictionary
-losses = {}
+losses = {'val_loss': [], 'train_loss': []}
 
 for i in range(max_steps):
     
@@ -153,11 +155,12 @@ for i in range(max_steps):
         model.eval()
         prompt = "I'm feeling dizzy"
         print(model._generate(prompt, max_len=200, temperature=1.0))
-    
+
+    val_loss_accum = 0.0
     # Evaluation of the model, validation.
     if i != 0 and i % eval_interval == 0:
         model.eval()
-        val_loss_accum = 0.0
+        
         with torch.no_grad():
             val_loader.reset()
             for _ in range(eval_iters):
@@ -170,11 +173,11 @@ for i in range(max_steps):
         dt = t1 - t0
         tokens_per_sec = val_loader.B * val_loader.T * eval_iters / dt
         with open(val_log_path, 'a') as f:
-            f.write(f"step {i:4d} | lr: {lr:.5f} | val_loss: {val_loss_accum:.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+            f.write(f"step {i:4d} | lr: {lr:.5f} | val_loss: {val_loss_accum:.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}\n")
         print(f"step {i:4d} | lr: {lr:.5f} | val_loss: {val_loss_accum:.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
     
     # Tracking val loss
-    losses['val_loss'] = losses.get('val_loss', []).append(val_loss_accum)
+    losses['val_loss'].append(val_loss_accum)
 
     # do one step of grad accum iters
     model.train()
@@ -196,8 +199,7 @@ for i in range(max_steps):
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     
-    # Tracking train loss
-    losses['train_loss'] = losses.get('train_loss', []).append(loss_accum)
+    losses['train_loss'].append(loss_accum)
 
     if best_loss > losses['train_loss'][-1]:
         best_loss = losses['train_loss'][-1] 
@@ -210,8 +212,8 @@ for i in range(max_steps):
                 'best_loss': best_loss,
                 'lr': lr # this will throw an error when save step set to 1. 
             }
-            print(f"saving model checkpoint to {model_out_path}")
-            torch.save(checkpoint, model_out_path + f'ckpt_{args.run_num}.pt')
+            print(f"saving model checkpoint to {model_out_path}, with best_loss: {best_loss:.4f}")
+            torch.save(checkpoint, os.path.join(model_out_path, f'ckpt_{args.run_num}.pt'))
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate
     lr = get_lr(i)
@@ -220,7 +222,7 @@ for i in range(max_steps):
         param_group['lr'] = lr
     optimizer.step()
 
-    if GPTConfig.device == "cuda":
+    if device == "cuda":
         torch.cuda.synchronize() # wait for the GPU to finish work
     
     t2 = time.time()
