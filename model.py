@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 master_process = True
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 class CausalSelfAttention(nn.Module):
 
@@ -99,7 +100,7 @@ class Tokenizer():
         tokens = self.encoder.encode(text) # Now the text is converted to tokens gpt2 has roughly 50k tokens (vocab_size). each token value corresponding to a word segment.
         assert len(tokens) <= GPTConfig.block_size, "Token length exceeds the block size of the model." # The model has a block size of 1024 tokens.
         tokens = torch.tensor(tokens, dtype=torch.long).unsqueeze(0) # (1, T) this is done for adding a batch dimension.
-        tokens = tokens.to(GPTConfig.device) # moving the tokens to the GPU.
+        tokens = tokens.to(device) # moving the tokens to the GPU.
         return tokens
     def decode(self, tokens: torch.Tensor) -> str:
 
@@ -209,7 +210,7 @@ class GPT(nn.Module):
         self.eval() # Setting to eval mode, for efficiency.
         tokenizer = Tokenizer() # Tokenizer class is used to encode the prompt.
         x = tokenizer.encode(prompt) # (1, T)
-        x = x.to(GPTConfig.device)
+        x = x.to(device)
 
         for _ in range(max_len):
             logits, _ = self.forward(x)
