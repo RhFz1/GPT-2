@@ -61,13 +61,13 @@ grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 # Learning rate params
 max_lr = 3e-4
 min_lr = max_lr * 0.1
-warmup_steps = 10
+warmup_steps = 50
 max_steps = 10000
 gain_for_next = 1.25
 # Evaluation Params
 eval_iters = 5
 eval_interval = 20
-save_step = 10 # save the model once evaluation is done.
+save_step = 2 # save the model once evaluation is done.
 test_step = 50
 # Torch precision settings
 torch.set_float32_matmul_precision('high')
@@ -145,6 +145,14 @@ val_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world
 # loss tracking dictionary
 losses = {'val_loss': [], 'train_loss': []}
 
+# logging the train run
+with open(train_log_path, 'a') as file:
+    file.write(f"Training run: {args.run_num}\n")
+file.close()
+with open(val_log_path, 'a') as file:
+    file.write(f"Training run: {args.run_num}\n")
+
+# Starting the train run
 for i in range(max_steps):
     
     # Start time
@@ -204,6 +212,7 @@ for i in range(max_steps):
     if best_loss > losses['train_loss'][-1]:
         best_loss = losses['train_loss'][-1] 
         if i > 0 and i % save_step == 0:
+            print(f"Preparing to save model with best loss: {losses['train_loss'][-1]:.4f}")
             checkpoint = {
                 'model' : raw_model.state_dict(),
                 'config' : raw_model.config,  
