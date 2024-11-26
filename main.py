@@ -11,6 +11,7 @@ class ModelConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
+    attn_pdrop: float = 0.3
 
 
 class MLP(nn.Module):
@@ -80,27 +81,28 @@ class GPT(nn.Module):
                 wte = nn.Embedding(config.vocab_size, config.n_embd),
                 wpe = nn.Embedding(config.block_size, config.n_embd),
                 h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-                lnf = nn.LayerNorm(config.n_embd)
+                ln_f = nn.LayerNorm(config.n_embd)
             )
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
     
-    def forward(self, x: torch.Tensor)->torch.Tensor:
-        B, T = x.size()
-        assert T <= self.transformer['wpe'].weight.size(0), 'Input sequence length is longer than the context size'
-
-        pos_emb = self.transformer['wpe'](torch.arange(T)) # (T, n_embd)
-        token_emb = self.transformer['wte'](x) # (B, T, n_embd)
+    def forward(self, idx: torch.Tensor)->torch.Tensor:
+        B, T = idx.size()
+        assert T <= self.transformer.wpe.weight.size(0), 'Input sequence length is longer than the context size'
+        pos = torch.arange(0, T, dtype=torch.long, device = idx.device)
+        pos_emb = self.transformer.wpe(pos) # (T, n_embd)
+        token_emb = self.transformer.wte(idx) # (B, T, n_embd)
         x = token_emb + pos_emb # (B, T, n_embd) + (T, n_embd) -> (B, T, n_embd)
 
-        for block in self.transformer['h']:
+        for block in self.transformer.h:
             x = block(x) # (B, T, n_embd)
         
-        x = self.lm_head(x) # (B, T, n_embd) -> (B, T, vocab_size)
-        return x
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x) # (B, T, n_embd) -> (B, T, vocab_size)
+        return logits
     
     @staticmethod
-    def from_pretrained(cls, model_type: str)->nn.Module:
+    def from_pretrained(model_type: str)->nn.Module:
         
         assert model_type == 'gpt2', 'Only GPT2 is supported'
         from transformers import GPT2LMHeadModel
@@ -113,6 +115,36 @@ class GPT(nn.Module):
         config = ModelConfig(**config_args)
         model = GPT(config)
         sd = model.state_dict()
-        sd_keys_hf = sd.keys()
-        sd_keys_hf = [k for k in sd_keys_hf if not k.startswith('attn.masked_bias')]
-        sd_keys_hf = [k for k in sd_keys_hf if not k.startswith('attn.bias')]
+        sd_keys = sd.keys()
+        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param
+
+        # init a huggingface/transformers model
+        model_hf = GPT2LMHeadModel.from_pretrained(model_type)
+        sd_hf = model_hf.state_dict()
+
+        # copy while ensuring all of the parameters are aligned and match in names and shapes
+        sd_keys_hf = sd_hf.keys()
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')] # ignore these, just a buffer
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] # same, just the mask (buffer)
+        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
+        # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
+        # this means that we have to transpose these weights when we import them
+        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+        for k in sd_keys_hf:
+            if any(k.endswith(w) for w in transposed):
+                # special treatment for the Conv1D weights we need to transpose
+                assert sd_hf[k].shape[::-1] == sd[k].shape
+                with torch.no_grad():
+                    sd[k].copy_(sd_hf[k].t())
+            else:
+                # vanilla copy over the other parameters
+                assert sd_hf[k].shape == sd[k].shape
+                with torch.no_grad():
+                    sd[k].copy_(sd_hf[k])
+
+        return model
+    
+
+if __name__ == '__main__':
+    model = GPT.from_pretrained(model_type='gpt2')
+    print('Model Loaded!!')
