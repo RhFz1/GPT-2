@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 from dataclasses import dataclass
 
 
@@ -38,24 +39,25 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd)
         self.scale = 1 / (self.head_dim ** 0.5)
         self.dropout = nn.Dropout(config.attn_pdrop)
+        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                     .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x: torch.Tensor)->torch.Tensor:
         B, T, C = x.size()
-        qkv = self.c_attn(x).reshape(B, T, 3, self.n_head, self.head_dim).permute(0, 2, 1, 3, 4)
-        q, k, v = qkv.unbind(dim=1)
-        
-        q = q.reshape(B * self.n_head, T, self.head_dim) # (B, 3, T, n_head, head_dim) -> 3 * (B * n_head, T,head_dim)
-        k = k.reshape(B * self.n_head, T, self.head_dim)
-        v = v.reshape(B * self.n_head, T, self.head_dim)
-
-        w = (q @ k.transpose(-2, -1)) * self.scale # (B * n_head, T, head_dim) @ (B * n_head, head_dim, T) -> (B * n_head, T, T)
-        w.masked_fill_(torch.tril(torch.ones(T, T, device=w.device, dtype=torch.bool), 1), float('-inf'))
-        w = F.softmax(w, dim=-1)
-        w = self.dropout(w) # (B * n_head, T, T)
-        
-        a = w @ v # (B * n_head, T, T) @ (B * n_head, T, head_dim) -> (B * n_head, T, head_dim)
-        a.reshape(B, self.n_head, T, self.head_dim).permute(0, 2, 1, 3).reshape(B, T, self.n_embd)
-        a = self.c_proj(a)
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        # attention (materializes the large (T,T) matrix for all the queries and keys)
+        att = (q @ k.transpose(-2, -1)) * self.scale
+        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+        # output projection
+        y = self.c_proj(y)
+        return y
         
         return a
 
@@ -145,6 +147,43 @@ class GPT(nn.Module):
         return model
     
 
-if __name__ == '__main__':
-    model = GPT.from_pretrained(model_type='gpt2')
-    print('Model Loaded!!')
+num_sequences = 5
+max_len = 30
+
+
+
+model = GPT.from_pretrained(model_type='gpt2')
+model.eval()
+model.to('cuda')
+
+
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+tokens = enc.encode("Hello I'm a large language model")
+tokens = torch.tensor(tokens, dtype=torch.long)
+tokens = tokens.unsqueeze(0).repeat(num_sequences, 1)
+x = tokens.to('cuda')
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+
+while x.size(1) < max_len:
+    
+    logits = model(x)
+
+    logits = logits[:, -1, :] # (B, vocab_size)
+
+    probs = F.softmax(logits, dim = 1)
+    topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+    # select a token from the top-k probabilities
+    # note: multinomial does not demand the input to sum to 1
+    ix = torch.multinomial(topk_probs, 1) # (B, 1)
+    # gather the corresponding indices
+    xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
+    # append to the sequence
+    x = torch.cat((x, xcol), dim=1)
+
+
+for row in range(num_sequences):
+    tokens = x[row, : max_len].tolist()
+    print(enc.decode(tokens))
