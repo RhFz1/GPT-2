@@ -88,7 +88,7 @@ class GPT(nn.Module):
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
     
-    def forward(self, idx: torch.Tensor)->torch.Tensor:
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None)->torch.Tensor:
         B, T = idx.size()
         assert T <= self.transformer.wpe.weight.size(0), 'Input sequence length is longer than the context size'
         pos = torch.arange(0, T, dtype=torch.long, device = idx.device)
@@ -101,7 +101,11 @@ class GPT(nn.Module):
         
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x) # (B, T, n_embd) -> (B, T, vocab_size)
-        return logits
+
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
     
     @staticmethod
     def from_pretrained(model_type: str)->nn.Module:
