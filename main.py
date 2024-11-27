@@ -155,23 +155,32 @@ elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
 
 print(f'Using device: {device}')
 
-num_sequences = 5
-max_len = 30
-
 model = GPT(ModelConfig())
 model.eval()
 model.to(device)
 
-
 import tiktoken
+    
 enc = tiktoken.get_encoding('gpt2')
-tokens = enc.encode("Hello I'm a large language model")
+
+with open('assets/input.txt', 'r') as file:
+    data = file.read()
+
+tokens = enc.encode(data[:1000])
 tokens = torch.tensor(tokens, dtype=torch.long)
-tokens = tokens.unsqueeze(0).repeat(num_sequences, 1)
-x = tokens.to(device)
+
+B, T = 4, 8
+buff = tokens[: B * T + 1]
+x = buff[:-1].view(B, T)
+y = buff[1: ].view(B, T)
+
+x = x.to(device)
 
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
+
+max_len = 32
+num_sequences = B
 
 while x.size(1) < max_len:
     
