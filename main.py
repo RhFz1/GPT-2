@@ -88,6 +88,8 @@ class GPT(nn.Module):
             )
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        self.transformer.wte.weight = self.lm_head.weight
     
     def forward(self, idx: torch.Tensor, targets: torch.Tensor = None)->torch.Tensor:
         B, T = idx.size()
