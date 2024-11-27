@@ -171,15 +171,18 @@ with open('assets/input.txt', 'r') as file:
     data = file.read()
 
 tokens = enc.encode(data[:1000])
-tokens = torch.tensor(tokens, dtype=torch.long)
+tokens = torch.tensor(tokens, dtype=torch.long, device=device)
 
 B, T = 4, 8
 buff = tokens[: B * T + 1]
 x = buff[:-1].view(B, T)
 y = buff[1: ].view(B, T)
 
-x = x.to(device)
+logits, loss = model(x, y)
 
+print(f"{loss.item():.4f}")
+
+import sys; sys.exit(0)
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
 
