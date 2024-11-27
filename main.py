@@ -203,6 +203,7 @@ print(f'Using device: {device}')
 model = GPT(ModelConfig())
 model.eval()
 model.to(device)
+model = torch.compile(model)
 
 B,T = 8, 1024
 trainloader = DataLoaderLite(B, T)
