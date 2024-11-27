@@ -21,6 +21,7 @@ class MLP(nn.Module):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, config.n_embd * 4)
         self.c_proj = nn.Linear(config.n_embd * 4, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
         self.act = F.gelu
         self.dropout = nn.Dropout(config.attn_pdrop)
         
@@ -38,6 +39,7 @@ class CausalSelfAttention(nn.Module):
         assert self.head_dim * self.n_head == self.n_embd, 'n_embd should be divisible by n_head'
         self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
         self.scale = 1 / (self.head_dim ** 0.5)
         self.dropout = nn.Dropout(config.attn_pdrop)
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
@@ -94,13 +96,15 @@ class GPT(nn.Module):
         self.apply(self._init_weights)
     
     def _init_weights(self, module):
-
+        std = 0.02
         if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean = 0.0, std=0.02)
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std = (2 * ModelConfig.n_layer)**-0.5
+            torch.nn.init.normal_(module.weight, mean = 0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight,mean = 0.0, std=0.02)
+            torch.nn.init.normal_(module.weight,mean = 0.0, std=std)
     
     def forward(self, idx: torch.Tensor, targets: torch.Tensor = None)->torch.Tensor:
         B, T = idx.size()
