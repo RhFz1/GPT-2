@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tiktoken
-import math
+import time
 from dataclasses import dataclass
 
 
@@ -184,16 +184,12 @@ class DataLoaderLite():
 
     def get_next_batch(self):
         B, T = self.B, self.T
-
         buff = self.tokens[self.pos : self.pos + B*T + 1]
-
         x = buff[:-1].view(B, T)
         y = buff[1:].view(B, T)
-
         self.pos += B * T
         if self.pos + B * T + 1  > len(self.tokens):
             self.pos = 0
-        
         return x, y
 
 device = 'cpu'
@@ -208,21 +204,26 @@ model = GPT(ModelConfig())
 model.eval()
 model.to(device)
 
-B,T = 4, 32
+B,T = 8, 1024
 trainloader = DataLoaderLite(B, T)
+
+torch.set_float32_matmul_precision('high')
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.99, 0.999))
 
-for i in range(100):
+for i in range(50):
+    t0 = time.time()
     x, y = trainloader.get_next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
     logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
-
-    if i % 10 == 0:
-        print(f"Step: {i + 1}, Loss: {loss.item():.6f}")
+    torch.cuda.synchronize()
+    t1 = time.time()
+    dt = (t1 - t0) * 1000 # in ms
+    tokens_per_sec = (trainloader.B * trainloader.T) / (t1 - t0)
+    print(f"Step: {i + 1}, Loss: {loss.item():.6f}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)
 torch.manual_seed(42)
