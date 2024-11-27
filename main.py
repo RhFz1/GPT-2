@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import tiktoken
 import math
 from dataclasses import dataclass
 
@@ -149,7 +150,34 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
-    
+
+
+class DataLoaderLite():
+
+    def __init__(self, B, T):
+        self.pos = 0
+        self.B = B
+        self.T = T
+        self.enc = tiktoken.get_encoding('gpt2')
+        text = open('assets/input.txt', 'r').read()
+        tokens = self.enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+        print(f"loaded {len(self.tokens)} tokens")
+        print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
+
+    def get_next_batch(self):
+        B, T = self.B, self.T
+
+        buff = self.tokens[self.pos : self.pos + B*T + 1]
+
+        x = buff[:-1].view(B, T)
+        y = buff[1:].view(B, T)
+
+        self.pos += B * T
+        if self.pos + B * T + 1  > len(self.tokens):
+            self.pos = 0
+        
+        return x, y
 
 device = 'cpu'
 if torch.cuda.is_available():
@@ -163,24 +191,21 @@ model = GPT(ModelConfig())
 model.eval()
 model.to(device)
 
-import tiktoken
-    
-enc = tiktoken.get_encoding('gpt2')
+B,T = 4, 32
+trainloader = DataLoaderLite(B, T)
 
-with open('assets/input.txt', 'r') as file:
-    data = file.read()
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.99, 0.999))
 
-tokens = enc.encode(data[:1000])
-tokens = torch.tensor(tokens, dtype=torch.long, device=device)
+for i in range(100):
+    x, y = trainloader.get_next_batch()
+    x, y = x.to(device), y.to(device)
+    optimizer.zero_grad()
+    logits, loss = model(x, y)
+    loss.backward()
+    optimizer.step()
 
-B, T = 4, 8
-buff = tokens[: B * T + 1]
-x = buff[:-1].view(B, T)
-y = buff[1: ].view(B, T)
-
-logits, loss = model(x, y)
-
-print(f"{loss.item():.4f}")
+    if i % 10 == 0:
+        print(f"Step: {i + 1}, Loss: {loss.item():.6f}")
 
 import sys; sys.exit(0)
 torch.manual_seed(42)
