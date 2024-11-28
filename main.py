@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import tiktoken
 import time
+import math
 from dataclasses import dataclass
 
 
@@ -193,6 +194,26 @@ class DataLoaderLite():
             self.pos = 0
         return x, y
 
+
+max_lr = 6e-4
+min_lr = 0.1 * max_lr
+warmup_steps = 10
+max_steps = 50
+def get_lr(itr):
+
+    # Linear warmup for warmup_steps
+    if itr < warmup_steps:
+        return max_lr * (itr + 1) / warmup_steps
+    # Min learning for greater than max_steps
+    if itr > max_steps:
+        return min_lr
+    
+    # Cosine annealing
+    decay_ratio = (itr - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + (max_lr - min_lr) * coeff
+
 device = 'cpu'
 if torch.cuda.is_available():
     device = 'cuda'
@@ -213,7 +234,7 @@ torch.set_float32_matmul_precision('high')
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 
-for i in range(50):
+for step in range(max_steps):
     t0 = time.time()
     x, y = trainloader.get_next_batch()
     x, y = x.to(device), y.to(device)
@@ -222,12 +243,15 @@ for i in range(50):
         logits, loss = model(x, y)
     loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     optimizer.step()
     torch.cuda.synchronize()
     t1 = time.time()
     dt = (t1 - t0) * 1000 # in ms
     tokens_per_sec = (trainloader.B * trainloader.T) / (t1 - t0)
-    print(f"Step: {i + 1}| Loss: {loss.item():.6f}| Norm: {norm:.4f}| dt: {dt:.2f}ms| tok/sec: {tokens_per_sec:.2f}")
+    print(f"Step: {step + 1}| Loss: {loss.item():.6f}| Lr: {lr:.4e}| Norm: {norm:.4f}| dt: {dt:.2f}ms| tok/sec: {tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)
 torch.manual_seed(42)
