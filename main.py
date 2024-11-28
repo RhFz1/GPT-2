@@ -211,7 +211,7 @@ trainloader = DataLoaderLite(B, T)
 
 torch.set_float32_matmul_precision('high')
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.99, 0.999))
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 
 for i in range(50):
     t0 = time.time()
@@ -221,12 +221,13 @@ for i in range(50):
     with torch.autocast(device_type=device, dtype=torch.bfloat16):
         logits, loss = model(x, y)
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
     torch.cuda.synchronize()
     t1 = time.time()
     dt = (t1 - t0) * 1000 # in ms
     tokens_per_sec = (trainloader.B * trainloader.T) / (t1 - t0)
-    print(f"Step: {i + 1}, Loss: {loss.item():.6f}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
+    print(f"Step: {i + 1}| Loss: {loss.item():.6f}| Norm: {norm:.4f}| dt: {dt:.2f}ms| tok/sec: {tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)
 torch.manual_seed(42)
