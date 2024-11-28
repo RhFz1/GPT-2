@@ -250,7 +250,14 @@ model.eval()
 model.to(device)
 model = torch.compile(model)
 
+total_batch_size = 524288
 B,T = 16, 1024
+assert total_batch_size % (B * T) == 0, 'Batch size must be divisible by B * T'
+grad_accum_steps = total_batch_size // (B * T)
+
+print(f"Total batch size: {total_batch_size}")
+print(f"Grad Accum steps: {grad_accum_steps}")
+
 trainloader = DataLoaderLite(B, T)
 
 torch.set_float32_matmul_precision('high')
@@ -260,12 +267,16 @@ optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, dev
 
 for step in range(max_steps):
     t0 = time.time()
-    x, y = trainloader.get_next_batch()
-    x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(x, y)
-    loss.backward()
+    loss_accum = 0.0
+    for _ in range(grad_accum_steps):
+        x, y = trainloader.get_next_batch()
+        x, y = x.to(device), y.to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach()
+        loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
@@ -274,8 +285,8 @@ for step in range(max_steps):
     torch.cuda.synchronize()
     t1 = time.time()
     dt = (t1 - t0) * 1000 # in ms
-    tokens_per_sec = (trainloader.B * trainloader.T) / (t1 - t0)
-    print(f"Step: {step + 1}| Loss: {loss.item():.6f}| Lr: {lr:.4e}| Norm: {norm:.4f}| dt: {dt:.2f}ms| tok/sec: {tokens_per_sec:.2f}")
+    tokens_per_sec = (grad_accum_steps * trainloader.B * trainloader.T) / (t1 - t0)
+    print(f"Step: {step + 1}| Loss: {loss_accum.item():.6f}| Lr: {lr:.4e}| Norm: {norm:.4f}| dt: {dt:.2f}ms| tok/sec: {tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)
 torch.manual_seed(42)
