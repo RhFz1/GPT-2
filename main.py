@@ -9,123 +9,124 @@ import inspect
 from dataclasses import dataclass
 
 
+# Configuration for the GPT model, including hyperparameters
 @dataclass
 class ModelConfig:
-    block_size: int = 1024
-    vocab_size: int = 50257
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-    attn_pdrop: float = 0.3
+    block_size: int = 1024       # Context window size
+    vocab_size: int = 50257     # Number of tokens in the vocabulary
+    n_layer: int = 12           # Number of transformer layers
+    n_head: int = 12            # Number of attention heads
+    n_embd: int = 768           # Embedding dimension
+    attn_pdrop: float = 0.3     # Dropout rate for attention
 
 
+# Multi-layer perceptron (MLP) used in the transformer blocks
 class MLP(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, config.n_embd * 4)
-        self.c_proj = nn.Linear(config.n_embd * 4, config.n_embd)
-        self.c_proj.NANOGPT_SCALE_INIT = 1
-        self.act = F.gelu
-        self.dropout = nn.Dropout(config.attn_pdrop)
+        self.c_fc = nn.Linear(config.n_embd, config.n_embd * 4)   # Expand embedding dimension
+        self.c_proj = nn.Linear(config.n_embd * 4, config.n_embd) # Project back to original size
+        self.c_proj.NANOGPT_SCALE_INIT = 1                        # Custom initialization scale
+        self.act = F.gelu                                          # Activation function
+        self.dropout = nn.Dropout(config.attn_pdrop)              # Dropout for regularization
         
-    def forward(self, x: torch.Tensor)->torch.Tensor:
-        h = self.act(self.c_fc(x))
-        h2 = self.c_proj(h)
-        return self.dropout(h2)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.act(self.c_fc(x))                                # Forward pass through first layer
+        h2 = self.c_proj(h)                                       # Forward pass through projection layer
+        return self.dropout(h2)                                   # Apply dropout
 
+
+# Causal Self-Attention Mechanism
 class CausalSelfAttention(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.n_embd = config.n_embd
         self.n_head = config.n_head
-        self.head_dim = self.n_embd // self.n_head
+        self.head_dim = self.n_embd // self.n_head               # Size of each attention head
         assert self.head_dim * self.n_head == self.n_embd, 'n_embd should be divisible by n_head'
-        self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd)
-        self.c_proj = nn.Linear(self.n_embd, self.n_embd)
-        self.c_proj.NANOGPT_SCALE_INIT = 1
-        self.scale = 1 / (self.head_dim ** 0.5)
-        self.dropout = nn.Dropout(config.attn_pdrop)
+        self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd)    # Query, key, and value projection
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd)        # Output projection
+        self.c_proj.NANOGPT_SCALE_INIT = 1                       # Custom initialization
+        self.scale = 1 / (self.head_dim ** 0.5)                  # Scale for attention scores
+        self.dropout = nn.Dropout(config.attn_pdrop)            # Dropout for attention weights
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                                     .view(1, 1, config.block_size, config.block_size))
+                                     .view(1, 1, config.block_size, config.block_size))  # Causal mask
 
-    def forward(self, x: torch.Tensor)->torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.size()
-        qkv = self.c_attn(x)
-        q, k, v = qkv.split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        # attention (materializes the large (T,T) matrix for all the queries and keys)
-        # att = (q @ k.transpose(-2, -1)) * self.scale
-        # att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-        # att = F.softmax(att, dim=-1)
-        # y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
-        # output projection
-        y = self.c_proj(y)
-        return y
+        qkv = self.c_attn(x)                                    # Compute query, key, value
+        q, k, v = qkv.split(self.n_embd, dim=2)                 # Split into separate tensors
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         
-        return a
+        # Scaled dot-product attention with causal masking
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)        # Reassemble outputs
+        y = self.c_proj(y)                                      # Project outputs back
+        return y
 
 
+# Transformer block containing attention and MLP layers
 class Block(nn.Module):
     def __init__(self, config: ModelConfig):
-        super().__init__()        
-        self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MLP(config)
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(config.n_embd)                # Layer normalization
+        self.attn = CausalSelfAttention(config)                # Attention layer
+        self.ln_2 = nn.LayerNorm(config.n_embd)                # Layer normalization
+        self.mlp = MLP(config)                                 # Feedforward MLP
     
-    def forward(self, x: torch.Tensor)->torch.Tensor:
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.ln_1(x))                        # Residual connection for attention
+        x = x + self.mlp(self.ln_2(x))                         # Residual connection for MLP
         return x
 
+
+# GPT model definition
 class GPT(nn.Module):
     def __init__(self, config: ModelConfig = ModelConfig()):
         super().__init__()
         self.transformer = nn.ModuleDict(
             dict(
-                wte = nn.Embedding(config.vocab_size, config.n_embd),
-                wpe = nn.Embedding(config.block_size, config.n_embd),
-                h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-                ln_f = nn.LayerNorm(config.n_embd)
+                wte=nn.Embedding(config.vocab_size, config.n_embd),  # Token embedding
+                wpe=nn.Embedding(config.block_size, config.n_embd),  # Positional embedding
+                h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),  # Transformer blocks
+                ln_f=nn.LayerNorm(config.n_embd)                     # Final normalization
             )
         )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)  # Output projection
 
-        self.transformer.wte.weight = self.lm_head.weight
-        
-        self.apply(self._init_weights)
+        self.transformer.wte.weight = self.lm_head.weight  # Weight tying
+        self.apply(self._init_weights)                     # Apply custom initialization
     
     def _init_weights(self, module):
-        std = 0.02
+        std = 0.02  # Standard deviation for initialization
         if isinstance(module, nn.Linear):
             if hasattr(module, 'NANOGPT_SCALE_INIT'):
                 std = (2 * ModelConfig.n_layer)**-0.5
-            torch.nn.init.normal_(module.weight, mean = 0.0, std=std)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight,mean = 0.0, std=std)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
     
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None)->torch.Tensor:
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None) -> torch.Tensor:
         B, T = idx.size()
-        assert T <= self.transformer.wpe.weight.size(0), 'Input sequence length is longer than the context size'
-        pos = torch.arange(0, T, dtype=torch.long, device = idx.device)
-        pos_emb = self.transformer.wpe(pos) # (T, n_embd)
-        token_emb = self.transformer.wte(idx) # (B, T, n_embd)
-        x = token_emb + pos_emb # (B, T, n_embd) + (T, n_embd) -> (B, T, n_embd)
+        assert T <= self.transformer.wpe.weight.size(0), 'Input sequence length exceeds context size'
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        pos_emb = self.transformer.wpe(pos)                  # Positional embeddings
+        token_emb = self.transformer.wte(idx)                # Token embeddings
+        x = token_emb + pos_emb                              # Combine embeddings
 
         for block in self.transformer.h:
-            x = block(x) # (B, T, n_embd)
+            x = block(x)                                     # Pass through transformer blocks
         
-        x = self.transformer.ln_f(x)
-        logits = self.lm_head(x) # (B, T, n_embd) -> (B, T, vocab_size)
+        x = self.transformer.ln_f(x)                        # Final layer normalization
+        logits = self.lm_head(x)                            # Compute logits
 
         loss = None
         if targets is not None:
+            # Compute cross-entropy loss for language modeling
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
     
