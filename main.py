@@ -197,25 +197,27 @@ class GPT(nn.Module):
 
 class DataLoaderLite():
 
-    def __init__(self, B, T):
+    def __init__(self, B, T, process_rank, num_processes):
         self.pos = 0
         self.B = B
         self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
         self.enc = tiktoken.get_encoding('gpt2')
         text = open('assets/input.txt', 'r').read()
         tokens = self.enc.encode(text)
         self.tokens = torch.tensor(tokens)
-        print(f"loaded {len(self.tokens)} tokens")
-        print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
-
+        if master_process:
+            print(f"loaded {len(self.tokens)} tokens")
+        self.pos = self.B * self.T * self.process_rank
     def get_next_batch(self):
         B, T = self.B, self.T
-        buff = self.tokens[self.pos : self.pos + B*T + 1]
+        buff = self.tokens[self.pos: self.pos + B*T + 1]
         x = buff[:-1].view(B, T)
         y = buff[1:].view(B, T)
-        self.pos += B * T
-        if self.pos + B * T + 1  > len(self.tokens):
-            self.pos = 0
+        self.pos += B * T * self.num_processes
+        if self.pos + (B * T * self.num_processes + 1)  > len(self.tokens):
+            self.pos = self.B * self.T * self.process_rank
         return x, y
 
 
@@ -278,15 +280,15 @@ model.eval()
 model.to(device)
 model = torch.compile(model)
 
-total_batch_size = 524288
+total_batch_size = 524288 # 2**19, ~0.5M tokens
 B,T = 16, 1024
-assert total_batch_size % (B * T) == 0, 'Batch size must be divisible by B * T'
-grad_accum_steps = total_batch_size // (B * T)
+assert total_batch_size % (B * T * ddp_world_size) == 0, 'Batch size must be divisible by B * T'
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+if master_process:
+    print(f"Total batch size: {total_batch_size}")
+    print(f"Grad Accum steps: {grad_accum_steps}")
 
-print(f"Total batch size: {total_batch_size}")
-print(f"Grad Accum steps: {grad_accum_steps}")
-
-trainloader = DataLoaderLite(B, T)
+trainloader = DataLoaderLite(B=B, T=T, process_rank = ddp_rank, num_processes = ddp_world_size)
 
 torch.set_float32_matmul_precision('high')
 
