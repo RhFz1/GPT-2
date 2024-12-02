@@ -275,6 +275,8 @@ else:
 
     print(f'Using device: {device}')
 
+ac_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
 model = GPT(ModelConfig(vocab_size=50304))
 model.eval()
 model.to(device)
@@ -306,7 +308,7 @@ for step in range(max_steps):
     for micro_step in range(grad_accum_steps):
         x, y = trainloader.get_next_batch()
         x, y = x.to(device), y.to(device)
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        with torch.autocast(device_type=ac_device, dtype=torch.bfloat16):
             logits, loss = model(x, y)
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
