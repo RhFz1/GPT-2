@@ -292,21 +292,29 @@ trainloader = DataLoaderLite(B=B, T=T, process_rank = ddp_rank, num_processes = 
 
 torch.set_float32_matmul_precision('high')
 
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank])
+raw_model =  model.module if ddp else model
+
 # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
-optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device=device)
 
 for step in range(max_steps):
     t0 = time.time()
     optimizer.zero_grad()
     loss_accum = 0.0
-    for _ in range(grad_accum_steps):
+    for micro_step in range(grad_accum_steps):
         x, y = trainloader.get_next_batch()
         x, y = x.to(device), y.to(device)
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             logits, loss = model(x, y)
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         loss.backward()
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
@@ -315,9 +323,12 @@ for step in range(max_steps):
     torch.cuda.synchronize()
     t1 = time.time()
     dt = (t1 - t0) * 1000 # in ms
-    tokens_per_sec = (grad_accum_steps * trainloader.B * trainloader.T) / (t1 - t0)
-    print(f"Step: {step + 1}| Loss: {loss_accum.item():.6f}| Lr: {lr:.4e}| Norm: {norm:.4f}| dt: {dt:.2f}ms| tok/sec: {tokens_per_sec:.2f}")
+    tokens_per_sec = (grad_accum_steps * trainloader.B * trainloader.T * ddp_world_size) / (t1 - t0)
+    if master_process:
+        print(f"Step: {step + 1}| Loss: {loss_accum.item():.6f}| Lr: {lr:.4e}| Norm: {norm:.4f}| dt: {dt:.2f}ms| tok/sec: {tokens_per_sec:.2f}")
 
+if ddp:
+    destroy_process_group()
 import sys; sys.exit(0)
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
