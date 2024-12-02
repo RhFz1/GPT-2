@@ -329,18 +329,21 @@ for step in range(max_steps):
     if master_process:
         print(f"Step: {step + 1}| Loss: {loss_accum.item():.6f}| Lr: {lr:.4e}| Norm: {norm:.4f}| dt: {dt:.2f}ms| tok/sec: {tokens_per_sec:.2f}")
 
-if ddp:
-    destroy_process_group()
-import sys; sys.exit(0)
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
+if ddp:
+    destroy_process_group()
+import sys; sys.exit()
+enc = tiktoken.get_encoding('gpt2')
 
-max_len = 32
-num_sequences = B
+max_len = 128
+num_sequences = 1
+x = enc.encode("RICHARD:A deadly groan, like life and death's departing.")
+x = torch.tensor(x, device=device).unsqueeze(0)
 
 while x.size(1) < max_len:
     
-    logits = model(x)
+    logits, _ = model(x)
 
     logits = logits[:, -1, :] # (B, vocab_size)
 
@@ -358,3 +361,12 @@ while x.size(1) < max_len:
 for row in range(num_sequences):
     tokens = x[row, : max_len].tolist()
     print(enc.decode(tokens))
+
+torch.save({
+    'model_dict': model.state_dict(),
+    'optimizer_dict': optimizer.state_dict()
+}, 'model.pt')
+
+
+if ddp:
+    destroy_process_group()
