@@ -238,14 +238,6 @@ def get_lr(itr):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + (max_lr - min_lr) * coeff
 
-device = 'cpu'
-if torch.cuda.is_available():
-    device = 'cuda'
-elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-    device = 'mps'
-
-print(f'Using device: {device}')
-
 # simple launch:
 # python train_gpt2.py
 # DDP launch for e.g. 8 GPUs:
@@ -255,6 +247,31 @@ print(f'Using device: {device}')
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+
+ddp = int(os.environ.get('RANK', -1)) != -1 # this flag sets ddp run.
+
+if ddp:
+    # for ddp it is advised to use CUDA, haven't tried for CPU configs
+    assert torch.cuda.is_available(), "Need CUDA for DDP maybe."
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+else:
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+    device = 'cpu'
+    if torch.cuda.is_available():
+        device = 'cuda'
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device = 'mps'
+
+    print(f'Using device: {device}')
 
 model = GPT(ModelConfig(vocab_size=50304))
 model.eval()
