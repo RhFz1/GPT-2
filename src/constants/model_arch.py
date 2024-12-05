@@ -194,4 +194,4 @@ class GPT(nn.Module):
         return optimizer
     
 if __name__ == '__main__':
-    model = 
+    model = GPT(config=ModelConfig())

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import tiktoken
 import time
 import math
-
+from src.constants.model_arch import GPT
 class DataLoaderLite():
 
     def __init__(self, B, T, process_rank, num_processes):
